@@ -418,20 +418,30 @@ class SobAdsSpider(scrapy.Spider):
 
         # Если на странице были объявления, сохраняем их
         if page_ads_count > 0:
-            # Формируем имя файла на основе URL
-            url_part = base_url.split('/')[-1].split('?')[0]
 
-            # Добавляем информацию о диапазоне площади в имя файла, если он установлен
-            square_info = ""
-            if square_from is not None and square_to is not None:
-                square_info = f"_sq{square_from}-{square_to}"
 
-            filename = f"results/ads_{url_part}{square_info}_page_{current_page}.json"
+            result_file = "results/all_ads.json"
 
-            with open(filename, 'w', encoding='utf-8') as f:
-                json.dump(ads, f, ensure_ascii=False, indent=4)
+            # Создаем директорию, если она не существует
+            os.makedirs(os.path.dirname(result_file), exist_ok=True)
 
-            self.logger.info(f"Сохранено {page_ads_count} объявлений в файл {filename}")
+            # Проверяем, существует ли файл, и загружаем данные или создаем пустой список
+            if os.path.exists(result_file):
+                with open(result_file, 'r', encoding='utf-8') as f:
+                    try:
+                        all_ads = json.load(f)
+                    except json.JSONDecodeError:
+                        # Если файл поврежден или пуст
+                        all_ads = []
+            else:
+                all_ads = []
+
+            # Добавляем новые объявления
+            all_ads.extend(ads)
+
+            # Сохраняем обновленный список обратно в файл
+            with open(result_file, 'w', encoding='utf-8') as f:
+                json.dump(all_ads, f, ensure_ascii=False, indent=4)
 
             # Обновляем общий счетчик объявлений
             ads_count += page_ads_count
@@ -557,6 +567,15 @@ if __name__ == "__main__":
 
     # Выберите, какой паук запустить
     # process.crawl(SobMenuSpider)  # Для сбора меню
-    process.crawl(SobAdsSpider)  # Для сбора объявлений
-    process.crawl(SobDetailSpider)  # Для сбора деталей объявлений
+
+    # Запускаем пауков последовательно
+    def crawl_detail_after_ads():
+        deferred = process.crawl(SobDetailSpider)
+        return deferred
+
+
+    # Сначала запускаем SobAdsSpider, и после его завершения запустится SobDetailSpider
+    deferred = process.crawl(SobAdsSpider)
+    deferred.addCallback(lambda _: crawl_detail_after_ads())
+
     process.start()
