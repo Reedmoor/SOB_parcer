@@ -1,6 +1,7 @@
 # SOB
 
 Сбор данных с объявлений в sob.ru
+результат будет лежать в sob_details.json
 
 ## Расположение
 
@@ -12,7 +13,7 @@
 - Локально
     1. Клонировать репозиторий `git clone https://github.com/Reedmoor/SOB_parcer`
     2. Установить зависимости `pip install scrapy`
-    3. `py main.py`
+    3. `py parser.py`
 
 ## Конфигурация
 
