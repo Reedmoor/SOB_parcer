@@ -125,9 +125,9 @@ class SobDetailSpider(scrapy.Spider):
         # Ищем ссылку на город в формате "Город г."
         city_link = response.css('div.flex-two-equals a.black-link::text').get()
 
-        if city_link and ' г.' in city_link:
-            # Возвращаем название города без "г."
-            return city_link.replace(' г.', '').strip()
+        if city_link and (' г.' in city_link or 'пос.' in city_link):
+            # Возвращаем название города без "г." и "пос."
+            return city_link.replace(' г.', '').replace('пос.', '').strip()
 
         # Если город не найден
         return "Москва"
