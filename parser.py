@@ -13,33 +13,51 @@ class SobDetailSpider(scrapy.Spider):
     def __init__(self, *args, **kwargs):
         super(SobDetailSpider, self).__init__(*args, **kwargs)
         self.results_dir = 'results'
-        self.details_dir = 'details'
+        self.details_file = 'sob_details.json'
+        self.details_path = os.path.join(self.results_dir, self.details_file)
 
-        # Создаем директорию для деталей, если её нет
-        if not os.path.exists(self.details_dir):
-            os.makedirs(self.details_dir)
+        # Создаем директорию для результатов, если её нет
+        if not os.path.exists(self.results_dir):
+            os.makedirs(self.results_dir)
+
+        # Загружаем существующие данные или создаем пустой список
+        self.existing_details = []
+        self.existing_urls = set()
+        if os.path.exists(self.details_path):
+            try:
+                with open(self.details_path, 'r', encoding='utf-8') as f:
+                    self.existing_details = json.load(f)
+                    # Создаем множество уже обработанных URL для быстрой проверки
+                    self.existing_urls = {item['url'] for item in self.existing_details if 'url' in item}
+                    self.logger.info(f"Загружено {len(self.existing_details)} существующих записей")
+            except Exception as e:
+                self.logger.error(f"Ошибка при чтении файла {self.details_file}: {e}")
 
         # Загружаем ссылки на объявления из всех JSON файлов в папке results
         self.ad_urls = []
         if os.path.exists(self.results_dir):
             for filename in os.listdir(self.results_dir):
-                if filename.endswith('.json'):
+                if filename.endswith('.json') and filename != self.details_file:
                     try:
                         filepath = os.path.join(self.results_dir, filename)
                         with open(filepath, 'r', encoding='utf-8') as f:
                             data = json.load(f)
                             for ad in data:
-                                if 'url' in ad and ad['url'] not in self.ad_urls:
+                                if 'url' in ad and ad['url'] not in self.existing_urls and ad[
+                                    'url'] not in self.ad_urls:
                                     self.ad_urls.append(ad['url'])
                     except Exception as e:
                         self.logger.error(f"Ошибка при чтении файла {filename}: {e}")
 
-        self.logger.info(f"Загружено {len(self.ad_urls)} ссылок на объявления")
+        self.logger.info(f"Загружено {len(self.ad_urls)} новых ссылок на объявления")
 
     def start_requests(self):
         # Обрабатываем каждую ссылку на объявление
         for url in self.ad_urls:
-            yield scrapy.Request(url, callback=self.parse_detail)
+            if url not in self.existing_urls:
+                yield scrapy.Request(url, callback=self.parse_detail)
+            else:
+                self.logger.info(f"Пропуск уже обработанного URL: {url}")
 
     def parse_detail(self, response):
         self.logger.info(f"Парсинг деталей объявления: {response.url}")
@@ -62,23 +80,21 @@ class SobDetailSpider(scrapy.Spider):
             'publication_date': self.get_publication_date(response)
         }
 
-        # Формируем имя файла на основе ID объявления из URL
-        ad_id = response.url.split('/')[-1]
-        if not ad_id:
-            ad_id = response.url.split('/')[-2]
+        # Добавляем новую запись и сохраняем результаты
+        self.existing_details.append(ad_detail)
+        self.existing_urls.add(response.url)
 
-        filename = f"{self.details_dir}/ad_{ad_id}.json"
+        # Сохраняем после каждой обработанной записи
+        with open(self.details_path, 'w', encoding='utf-8') as f:
+            json.dump(self.existing_details, f, ensure_ascii=False, indent=4)
 
-        # Сохраняем результаты
-        with open(filename, 'w', encoding='utf-8') as f:
-            json.dump(ad_detail, f, ensure_ascii=False, indent=4)
+        self.logger.info(f"Детали объявления сохранены. Всего записей: {len(self.existing_details)}")
 
-        self.logger.info(f"Детали объявления сохранены в файл {filename}")
 
     def get_title(self, response):
-        # Заголовок объявления
-        title = response.css('div.adv-page-title h1::text').get()
-        return title.strip() if title else ""
+            # Заголовок объявления
+            title = response.css('div.adv-page-title h1::text').get()
+            return title.strip() if title else ""
 
     def get_price(self, response):
         # Цена в объявлении
@@ -113,6 +129,7 @@ class SobDetailSpider(scrapy.Spider):
             # Возвращаем название города без "г."
             return city_link.replace(' г.', '').strip()
 
+        # Если город не найден
         return "Москва"
     def get_address(self, response):
         # Адрес (улица, дом)
@@ -247,7 +264,6 @@ class SobDetailSpider(scrapy.Spider):
 
         return None  # Возвращаем None, если дата не найдена
 
-
 class SobAdsSpider(scrapy.Spider):
     name = "sob_ads"
 
@@ -278,403 +294,107 @@ class SobAdsSpider(scrapy.Spider):
             self.logger.error(f"Ошибка при загрузке JSON: {e}")
 
     def start_requests(self):
-        # Добавляем import re для работы с регулярными выражениями
-        import re
-
         # Обрабатываем каждую ссылку из JSON
         for url in self.start_urls:
-            # Для каждой ссылки начинаем с широкого диапазона площади
-            min_square = 1
-            max_square = 999
-
-            # Добавляем параметры площади к URL
-            if '?' in url:
-                url_with_params = f"{url}&total_square_from={min_square}&total_square_to={max_square}"
-            else:
-                url_with_params = f"{url}?total_square_from={min_square}&total_square_to={max_square}"
-
             # Начинаем с первой страницы
-            yield scrapy.Request(
-                url_with_params,
-                callback=self.check_range,
-                meta={
-                    'base_url': url,
-                    'square_range': {'from': min_square, 'to': max_square},
-                    'adjusting_range': True,  # Флаг, показывающий, что мы настраиваем диапазон
-                    'fine_tuning': False  # Флаг для тонкой настройки верхней границы
-                }
-            )
-
-    def check_range(self, response):
-        """Проверяет текущий диапазон площади и корректирует при необходимости"""
-        base_url = response.meta.get('base_url')
-        square_range = response.meta.get('square_range')
-        previous_good = response.meta.get('previous_good', None)
-        phase = response.meta.get('phase', 'initial')  # Фазы: initial, expand, binary_search
-
-        self.logger.info(f"Проверка диапазона: от {square_range['from']} до {square_range['to']} м² для {base_url}")
-
-        # Проверяем наличие элемента пагинации с rel="last"
-        last_page_link = response.css('a[rel="last"]')
-        too_many_pages = False
-        last_page_number = 0
-
-        if last_page_link:
-            href = last_page_link.css('::attr(href)').get()
-            page_match = re.search(r'page=(\d+)', href)
-            if page_match:
-                last_page_number = int(page_match.group(1))
-                if last_page_number >= 30:
-                    too_many_pages = True
-                    self.logger.info(f"Обнаружена пагинация с последней страницей {last_page_number} (≥30)")
-
-        # Формируем следующий URL
-        def make_url(from_val, to_val):
-            if '?' in base_url:
-                return f"{base_url}&total_square_from={from_val}&total_square_to={to_val}"
-            else:
-                return f"{base_url}?total_square_from={from_val}&total_square_to={to_val}"
-
-        if phase == 'initial':
-            if too_many_pages:
-                # Слишком много страниц, уменьшаем верхнюю границу вдвое
-                new_max = max(square_range['from'] + 10, square_range['to'] // 2)
-                new_square_range = {'from': square_range['from'], 'to': new_max}
-
-                self.logger.info(f"Много страниц ({last_page_number}). Уменьшаем до {new_max}")
-
-                yield scrapy.Request(
-                    make_url(new_square_range['from'], new_square_range['to']),
-                    callback=self.check_range,
-                    meta={
-                        'base_url': base_url,
-                        'square_range': new_square_range,
-                        'phase': 'initial',
-                    }
-                )
-            else:
-                # Переходим к фазе увеличения
-                self.logger.info(f"Переходим к фазе увеличения диапазона")
-
-                # Начинаем с агрессивного увеличения (на 50)
-                increase_step = min(50, 999 - square_range['to'])
-                if increase_step <= 0:
-                    # Достигли максимума, начинаем парсинг
-                    yield scrapy.Request(
-                        make_url(square_range['from'], square_range['to']),
-                        callback=self.parse,
-                        meta={
-                            'page': 1,
-                            'base_url': base_url,
-                            'ads_count': 0,
-                            'square_range': square_range
-                        }
-                    )
-                else:
-                    new_square_range = {'from': square_range['from'], 'to': square_range['to'] + increase_step}
-
-                    yield scrapy.Request(
-                        make_url(new_square_range['from'], new_square_range['to']),
-                        callback=self.check_range,
-                        meta={
-                            'base_url': base_url,
-                            'square_range': new_square_range,
-                            'previous_good': square_range,
-                            'phase': 'expand',
-                            'step': increase_step,
-                        }
-                    )
-
-        elif phase == 'expand':
-            current_step = response.meta.get('step', 50)
-
-            if too_many_pages:
-                # Нашли границу, переходим к бинарному поиску
-                # previous_good - последний хороший диапазон
-                # square_range - текущий плохой диапазон
-                prev_to = previous_good['to']
-                current_to = square_range['to']
-
-                # Средняя точка между последним хорошим и текущим плохим
-                mid_point = prev_to + (current_to - prev_to) // 2
-
-                if mid_point == prev_to:
-                    # Не можем дальше уточнять, используем последний хороший диапазон
-                    self.logger.info(f"Найден оптимальный диапазон: {previous_good['from']}-{previous_good['to']} м²")
-
-                    yield scrapy.Request(
-                        make_url(previous_good['from'], previous_good['to']),
-                        callback=self.parse,
-                        meta={
-                            'page': 1,
-                            'base_url': base_url,
-                            'ads_count': 0,
-                            'square_range': previous_good
-                        }
-                    )
-                else:
-                    # Бинарный поиск
-                    new_square_range = {'from': square_range['from'], 'to': mid_point}
-
-                    self.logger.info(f"Бинарный поиск между {prev_to} и {current_to}: пробуем {mid_point}")
-
-                    yield scrapy.Request(
-                        make_url(new_square_range['from'], new_square_range['to']),
-                        callback=self.check_range,
-                        meta={
-                            'base_url': base_url,
-                            'square_range': new_square_range,
-                            'previous_good': previous_good,
-                            'bad_range': square_range,
-                            'phase': 'binary_search',
-                        }
-                    )
-            else:
-                # Можем увеличить еще больше
-                if square_range['to'] >= 999:
-                    # Достигли максимума
-                    self.logger.info(f"Достигли максимального диапазона (999 м²)")
-
-                    yield scrapy.Request(
-                        make_url(square_range['from'], square_range['to']),
-                        callback=self.parse,
-                        meta={
-                            'page': 1,
-                            'base_url': base_url,
-                            'ads_count': 0,
-                            'square_range': square_range
-                        }
-                    )
-                else:
-                    # Удваиваем шаг для более быстрого поиска границы
-                    next_step = min(current_step * 2, 999 - square_range['to'])
-
-                    if next_step <= 0:
-                        # Достигли максимума
-                        self.logger.info(f"Достигли максимального диапазона (999 м²)")
-
-                        yield scrapy.Request(
-                            make_url(square_range['from'], square_range['to']),
-                            callback=self.parse,
-                            meta={
-                                'page': 1,
-                                'base_url': base_url,
-                                'ads_count': 0,
-                                'square_range': square_range
-                            }
-                        )
-                    else:
-                        new_square_range = {'from': square_range['from'], 'to': square_range['to'] + next_step}
-
-                        self.logger.info(f"Увеличиваем до {new_square_range['to']} (шаг: {next_step})")
-
-                        yield scrapy.Request(
-                            make_url(new_square_range['from'], new_square_range['to']),
-                            callback=self.check_range,
-                            meta={
-                                'base_url': base_url,
-                                'square_range': new_square_range,
-                                'previous_good': square_range,
-                                'phase': 'expand',
-                                'step': next_step,
-                            }
-                        )
-
-        elif phase == 'binary_search':
-            bad_range = response.meta.get('bad_range')
-
-            if too_many_pages:
-                # Текущая точка тоже "плохая"
-                new_bad = square_range
-                # Средняя точка между последним хорошим и новым плохим
-                mid_point = previous_good['to'] + (new_bad['to'] - previous_good['to']) // 2
-
-                if mid_point == previous_good['to']:
-                    # Не можем дальше уточнять, используем последний хороший диапазон
-                    self.logger.info(f"Найден оптимальный диапазон: {previous_good['from']}-{previous_good['to']} м²")
-
-                    yield scrapy.Request(
-                        make_url(previous_good['from'], previous_good['to']),
-                        callback=self.parse,
-                        meta={
-                            'page': 1,
-                            'base_url': base_url,
-                            'ads_count': 0,
-                            'square_range': previous_good
-                        }
-                    )
-                else:
-                    # Продолжаем бинарный поиск
-                    new_square_range = {'from': square_range['from'], 'to': mid_point}
-
-                    self.logger.info(f"Бинарный поиск: пробуем {mid_point}")
-
-                    yield scrapy.Request(
-                        make_url(new_square_range['from'], new_square_range['to']),
-                        callback=self.check_range,
-                        meta={
-                            'base_url': base_url,
-                            'square_range': new_square_range,
-                            'previous_good': previous_good,
-                            'bad_range': new_bad,
-                            'phase': 'binary_search',
-                        }
-                    )
-            else:
-                # Текущая точка "хорошая"
-                if square_range['to'] + 1 >= bad_range['to']:
-                    # Нашли оптимальную точку
-                    self.logger.info(f"Найден оптимальный диапазон: {square_range['from']}-{square_range['to']} м²")
-
-                    yield scrapy.Request(
-                        make_url(square_range['from'], square_range['to']),
-                        callback=self.parse,
-                        meta={
-                            'page': 1,
-                            'base_url': base_url,
-                            'ads_count': 0,
-                            'square_range': square_range
-                        }
-                    )
-                else:
-                    # Продолжаем поиск
-                    mid_point = square_range['to'] + (bad_range['to'] - square_range['to']) // 2
-                    new_square_range = {'from': square_range['from'], 'to': mid_point}
-
-                    self.logger.info(f"Бинарный поиск: пробуем {mid_point}")
-
-                    yield scrapy.Request(
-                        make_url(new_square_range['from'], new_square_range['to']),
-                        callback=self.check_range,
-                        meta={
-                            'base_url': base_url,
-                            'square_range': new_square_range,
-                            'previous_good': square_range,
-                            'bad_range': bad_range,
-                            'phase': 'binary_search',
-                        }
-                    )
+            yield scrapy.Request(url, callback=self.parse, meta={'page': 1, 'base_url': url, 'ads_count': 0})
 
     def parse(self, response):
         current_page = response.meta.get('page', 1)
         base_url = response.meta.get('base_url', response.url)
         ads_count = response.meta.get('ads_count', 0)
-        square_range = response.meta.get('square_range', {'from': self.min_square, 'to': self.max_square})
-        first_check = response.meta.get('first_check', False)
-
-        ads = []
+        square_from = response.meta.get('square_from', None)
+        square_to = response.meta.get('square_to', None)
 
         self.logger.info(f"Парсинг страницы {current_page} для {base_url}")
-        self.logger.info(f"Текущий диапазон площади: от {square_range['from']} до {square_range['to']} м²")
+
+        # Проверяем количество страниц в пагинации
+        last_page_link = response.css('a[rel="last"] b::text').get()
+
+        # Если это первая страница и есть пагинация с 30+ страницами, разделяем поиск
+        if current_page == 1 and last_page_link and int(last_page_link) >= 30:
+            # Если параметры площади еще не установлены
+            if square_from is None and square_to is None:
+                # Устанавливаем начальные значения
+                square_from = 1
+                square_to = 999
+
+                # Формируем URL с параметрами площади
+                if '?' in base_url:
+                    next_url = f"{base_url}&total_square_from={square_from}&total_square_to={square_to}"
+                else:
+                    next_url = f"{base_url}?total_square_from={square_from}&total_square_to={square_to}"
+
+                self.logger.info(f"Слишком много результатов, добавляем фильтр по площади: {square_from}-{square_to}")
+                yield scrapy.Request(
+                    next_url,
+                    callback=self.parse,
+                    meta={'page': 1, 'base_url': base_url, 'ads_count': ads_count,
+                          'square_from': square_from, 'square_to': square_to}
+                )
+                return
+
+            # Если параметры площади уже установлены, но результатов все еще много
+            elif last_page_link and int(last_page_link) >= 30 and square_to > square_from:
+                # Уменьшаем верхнюю границу вдвое
+                new_square_to = square_to // 2
+
+                if new_square_to <= square_from:
+                    new_square_to = square_from + 1
+
+                # Формируем URL с обновленными параметрами
+                if '?' in base_url:
+                    next_url = f"{base_url}&total_square_from={square_from}&total_square_to={new_square_to}"
+                else:
+                    next_url = f"{base_url}?total_square_from={square_from}&total_square_to={new_square_to}"
+
+                self.logger.info(f"Все еще много результатов, сужаем диапазон площади: {square_from}-{new_square_to}")
+                yield scrapy.Request(
+                    next_url,
+                    callback=self.parse,
+                    meta={'page': 1, 'base_url': base_url, 'ads_count': ads_count,
+                          'square_from': square_from, 'square_to': new_square_to}
+                )
+                return
+
+        # Если количество страниц меньше 30 и у нас установлены параметры площади
+        # Проверяем, нужно ли сдвинуть нижнюю границу
+        elif current_page == 1 and square_from is not None and square_to is not None and last_page_link and int(
+                last_page_link) < 30:
+            # Переходим к следующему диапазону площади
+            new_square_from = square_to + 1
+            new_square_to = 999
+
+            # Формируем URL для следующего диапазона
+            if '?' in base_url:
+                next_url = f"{base_url}&total_square_from={new_square_from}&total_square_to={new_square_to}"
+            else:
+                next_url = f"{base_url}?total_square_from={new_square_from}&total_square_to={new_square_to}"
+
+            self.logger.info(f"Переходим к следующему диапазону площади: {new_square_from}-{new_square_to}")
+            yield scrapy.Request(
+                next_url,
+                callback=self.parse,
+                meta={'page': 1, 'base_url': base_url, 'ads_count': ads_count,
+                      'square_from': new_square_from, 'square_to': new_square_to}
+            )
+
+        # Парсим объявления
+        ads = []
 
         # Находим все элементы с классом grid-search-content
         grid_items = response.css('.grid-search-content')
 
-        # ВАЖНО: Проверяем наличие элемента пагинации с rel="last" и href, содержащим page=30
-        last_page_link = response.css('a[rel="last"]')
-        too_many_pages = False
-
-        if last_page_link:
-            href = last_page_link.css('::attr(href)').get()
-            if href and 'page=30' in href:
-                too_many_pages = True
-                self.logger.info("Обнаружена пагинация с последней страницей 30 или более")
-
-        # Если это первая проверка и обнаружено слишком много страниц, уменьшаем верхний предел площади
-        if first_check and too_many_pages:
-            self.logger.info(f"Обнаружено слишком много страниц. Уменьшаем верхний предел площади.")
-
-            # Уменьшаем верхний предел площади
-            new_max = square_range['to'] - self.reduction_step
-            if new_max <= square_range['from']:
-                new_max = square_range['from'] + 10  # Минимальный диапазон
-
-            new_square_range = {'from': square_range['from'], 'to': new_max}
-
-            # Формируем URL с новыми параметрами площади
-            if '?' in base_url:
-                next_url = f"{base_url}&total_square_from={new_square_range['from']}&total_square_to={new_square_range['to']}"
-            else:
-                next_url = f"{base_url}?total_square_from={new_square_range['from']}&total_square_to={new_square_range['to']}"
-
+        # Если на странице нет объявлений и у нас установлены параметры площади
+        if not grid_items and square_from is not None and square_to is not None:
+            # Если текущий диапазон не дал результатов, переходим к следующему URL из start_urls
             self.logger.info(
-                f"Пробуем с новым диапазоном: от {new_square_range['from']} до {new_square_range['to']} м²")
-            yield scrapy.Request(
-                next_url,
-                callback=self.parse,
-                meta={
-                    'page': 1,
-                    'base_url': base_url,
-                    'ads_count': 0,
-                    'square_range': new_square_range,
-                    'first_check': True  # Продолжаем проверять
-                }
-            )
+                f"Нет объявлений для диапазона площади {square_from}-{square_to}, переходим к следующей ссылке")
             return
 
-        # Если на странице нет объявлений, переходим к следующему диапазону
-        if not grid_items and first_check:
-            self.logger.info(f"В диапазоне {square_range['from']}-{square_range['to']} м² не найдено объявлений.")
-
-            # Если текущий диапазон не весь (не до 999), переходим к следующему
-            if square_range['to'] < 999:
-                new_from = square_range['to'] + 1
-                new_to = 999
-
-                new_square_range = {'from': new_from, 'to': new_to}
-
-                # Формируем URL с новыми параметрами площади
-                if '?' in base_url:
-                    next_url = f"{base_url}&total_square_from={new_square_range['from']}&total_square_to={new_square_range['to']}"
-                else:
-                    next_url = f"{base_url}?total_square_from={new_square_range['from']}&total_square_to={new_square_range['to']}"
-
-                self.logger.info(
-                    f"Переходим к следующему диапазону: от {new_square_range['from']} до {new_square_range['to']} м²")
-                yield scrapy.Request(
-                    next_url,
-                    callback=self.parse,
-                    meta={
-                        'page': 1,
-                        'base_url': base_url,
-                        'ads_count': 0,
-                        'square_range': new_square_range,
-                        'first_check': True
-                    }
-                )
-            else:
-                self.logger.info(f"Достигнут конец диапазона площадей. Завершаем парсинг.")
-            return
-
-        # Если на странице нет объявлений при пагинации, прекращаем пагинацию
-        if not grid_items and not first_check:
+        # Если на странице нет объявлений, прекращаем пагинацию
+        if not grid_items:
             self.logger.info(f"На странице {current_page} для {base_url} не найдено объявлений. Прекращаем пагинацию.")
-
-            # Переходим к следующему диапазону
-            new_from = square_range['to'] + 1
-            new_to = 999
-
-            new_square_range = {'from': new_from, 'to': new_to}
-
-            # Формируем URL с новыми параметрами площади
-            if '?' in base_url:
-                next_url = f"{base_url}&total_square_from={new_square_range['from']}&total_square_to={new_square_range['to']}"
-            else:
-                next_url = f"{base_url}?total_square_from={new_square_range['from']}&total_square_to={new_square_range['to']}"
-
-            self.logger.info(
-                f"Переходим к следующему диапазону: от {new_square_range['from']} до {new_square_range['to']} м²")
-            yield scrapy.Request(
-                next_url,
-                callback=self.parse,
-                meta={
-                    'page': 1,
-                    'base_url': base_url,
-                    'ads_count': 0,
-                    'square_range': new_square_range,
-                    'first_check': True
-                }
-            )
             return
 
         self.logger.info(f"Найдено {len(grid_items)} элементов grid-search-content")
@@ -682,11 +402,6 @@ class SobAdsSpider(scrapy.Spider):
         # Счетчик объявлений на текущей странице
         page_ads_count = 0
 
-        # Формируем базовое имя файла для сохранения
-        url_part = base_url.split('/')[-1].split('?')[0]
-        base_filename = f"results/ads_{url_part}_sq_{square_range['from']}-{square_range['to']}"
-
-        # Обрабатываем найденные объявления
         for item in grid_items:
             # Находим ссылки с классом title-adv
             title_links = item.css('.title-adv')
@@ -694,91 +409,80 @@ class SobAdsSpider(scrapy.Spider):
                 href = link.css('::attr(href)').get()
                 title = link.css('::text').get()
 
-                ad_data = {
+                ads.append({
                     'title': title.strip() if title else '',
                     'url': response.urljoin(href),
-                }
-                ads.append(ad_data)
-                # Сохраняем каждое объявление отдельно
+                })
+                page_ads_count += 1
                 self.logger.info(f"Найдено объявление: {title.strip() if title else ''} - {href}")
 
-                # **Формируем путь к JSON-файлу**
-                filename = f"results/ads_{square_range['from']}-{square_range['to']}.json"
+        # Если на странице были объявления, сохраняем их
+        if page_ads_count > 0:
+            # Формируем имя файла на основе URL
+            url_part = base_url.split('/')[-1].split('?')[0]
 
-                # **Если файл уже существует, загружаем старые данные**
-                if os.path.exists(filename):
-                    with open(filename, 'r', encoding='utf-8') as f:
-                        try:
-                            existing_ads = json.load(f)
-                        except json.JSONDecodeError:
-                            existing_ads = []
+            # Добавляем информацию о диапазоне площади в имя файла, если он установлен
+            square_info = ""
+            if square_from is not None and square_to is not None:
+                square_info = f"_sq{square_from}-{square_to}"
+
+            filename = f"results/ads_{url_part}{square_info}_page_{current_page}.json"
+
+            with open(filename, 'w', encoding='utf-8') as f:
+                json.dump(ads, f, ensure_ascii=False, indent=4)
+
+            self.logger.info(f"Сохранено {page_ads_count} объявлений в файл {filename}")
+
+            # Обновляем общий счетчик объявлений
+            ads_count += page_ads_count
+
+            # Определяем последнюю часть функции parse, которая обрабатывает пагинацию
+
+            # Проверяем, есть ли следующая страница
+            if current_page < 30:
+                next_page = current_page + 1
+
+                # Формируем URL следующей страницы, сохраняя параметры площади, если они есть
+                next_url = base_url
+
+                # Добавляем параметры площади, если они заданы
+                if square_from is not None and square_to is not None:
+                    if '?' in next_url:
+                        next_url = f"{next_url}&total_square_from={square_from}&total_square_to={square_to}"
+                    else:
+                        next_url = f"{next_url}?total_square_from={square_from}&total_square_to={square_to}"
+
+                # Добавляем номер страницы
+                if '?' in next_url:
+                    next_url = f"{next_url}&page={next_page}"
                 else:
-                    existing_ads = []
+                    next_url = f"{next_url}?page={next_page}"
 
-                # **Добавляем новые объявления и записываем обратно**
-                existing_ads.extend(ads)
-
-                with open(filename, 'w', encoding='utf-8') as f:
-                    json.dump(existing_ads, f, ensure_ascii=False, indent=4)
-
-                self.logger.info(f"Обновлен файл {filename}, всего объявлений: {len(existing_ads)}")
-
-        # Если нашли объявления и не достигли предела пагинации, переходим к следующей странице
-        if page_ads_count > 0 and current_page < 30 and not too_many_pages:
-            next_page = current_page + 1
-
-            # Формируем URL следующей страницы с сохранением параметров площади
-            if '?' in base_url:
-                next_url = f"{base_url}&total_square_from={square_range['from']}&total_square_to={square_range['to']}&page={next_page}"
-            else:
-                next_url = f"{base_url}?total_square_from={square_range['from']}&total_square_to={square_range['to']}&page={next_page}"
-
-            self.logger.info(f"Переход к странице {next_page}: {next_url}")
-            yield scrapy.Request(
-                next_url,
-                callback=self.parse,
-                meta={
-                    'page': next_page,
-                    'base_url': base_url,
-                    'ads_count': ads_count,
-                    'square_range': square_range,
-                    'first_check': False
-                }
-            )
-        else:
-            # Если дошли до конца пагинации или нет объявлений, переходим к следующему диапазону
-            if current_page >= 30 or too_many_pages:
-                self.logger.info(
-                    f"Достигнут предел пагинации для диапазона {square_range['from']}-{square_range['to']} м².")
-
-            # Переходим к следующему диапазону
-            new_from = square_range['to'] + 1
-            new_to = 999
-
-            if new_from < 999:
-                new_square_range = {'from': new_from, 'to': new_to}
-
-                # Формируем URL с новыми параметрами площади
-                if '?' in base_url:
-                    next_url = f"{base_url}&total_square_from={new_square_range['from']}&total_square_to={new_square_range['to']}"
-                else:
-                    next_url = f"{base_url}?total_square_from={new_square_range['from']}&total_square_to={new_square_range['to']}"
-
-                self.logger.info(
-                    f"Переходим к следующему диапазону: от {new_square_range['from']} до {new_square_range['to']} м²")
+                self.logger.info(f"Переход к странице {next_page}: {next_url}")
                 yield scrapy.Request(
                     next_url,
                     callback=self.parse,
                     meta={
-                        'page': 1,
+                        'page': next_page,
                         'base_url': base_url,
-                        'ads_count': 0,
-                        'square_range': new_square_range,
-                        'first_check': True
+                        'ads_count': ads_count,
+                        'square_from': square_from,
+                        'square_to': square_to
                     }
                 )
             else:
-                self.logger.info(f"Достигнут конец диапазона площадей. Завершаем парсинг.")
+                # Если достигли предела пагинации
+                square_info = ""
+                if square_from is not None and square_to is not None:
+                    square_info = f" для диапазона площади {square_from}-{square_to}"
+
+                self.logger.info(
+                    f"Достигнут предел пагинации (30) для {base_url}{square_info}. Всего собрано {ads_count} объявлений.")
+        else:
+            # Если на странице не было объявлений
+            self.logger.info(f"На странице {current_page} для {base_url} не найдено объявлений. Прекращаем пагинацию.")
+
+
 class SobMenuSpider(scrapy.Spider):
     name = "sob_menu"
     start_urls = ["https://sob.ru/"]
@@ -853,6 +557,6 @@ if __name__ == "__main__":
 
     # Выберите, какой паук запустить
     # process.crawl(SobMenuSpider)  # Для сбора меню
-    process.crawl(SobAdsSpider)   # Для сбора объявлений
-    # process.crawl(SobDetailSpider)  # Для сбора деталей объявлений
+    process.crawl(SobAdsSpider)  # Для сбора объявлений
+    process.crawl(SobDetailSpider)  # Для сбора деталей объявлений
     process.start()
