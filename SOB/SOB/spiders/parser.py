@@ -43,7 +43,24 @@ class SobDetailSpider(scrapy.Spider):
 
         self.logger.info(f"Запуск обработки {len(self.ad_urls)} URL-адресов")
         for url in self.ad_urls:
-            yield Request(url=url, callback=self.parse_detail)
+            yield Request(url=url,
+                          method="GET",
+                          callback=self.parse_detail,
+                          errback=self.handle_error,
+                          )
+
+    def handle_error(self, failure) -> None:
+        if failure.check(HttpError):
+            self.logger.error(
+                "HttpError on %s. Status code: %s",
+                failure.value.response.url,
+                failure.value.response.status,
+            )
+        elif failure.check(DNSLookupError):
+            self.logger.error("DNSLookupError on %s", failure.request.url)
+        elif failure.check((TimeoutError, TCPTimedOutError)):
+            self.logger.error("TimeoutError on %s", failure.request.url)
+
 
     def _ensure_results_directory(self):
         """Создает директорию для результатов, если её нет"""
@@ -294,40 +311,52 @@ class SobAdsSpider(scrapy.Spider):
         self.all_ads_file = '../../../results/all_ads.json'
         self.all_ads = []
 
-        # Создаем директорию для сохранения результатов, если её нет
-        if not os.path.exists('../../../results'):
-            os.makedirs('../../../results')
+        # Создаем директорию для результатов
+        self._ensure_results_directory()
 
-        # Проверяем существование файла all_ads.json и загружаем его содержимое
+        # Загружаем существующие объявления
+        self._load_existing_ads()
+
+        # Загружаем URL из меню
+        self._load_menu_urls()
+
+    # Проверяем существование файла all_ads.json и загружаем его содержимое
+    def ensure_results_directory(self):
+        """Создает директорию для результатов, если её нет"""
+        if not os.path.exists(self.results_dir):
+            os.makedirs(self.results_dir)
+            self.logger.info(f"Создана директория для результатов: {self.results_dir}")
+
+    def load_existing_ads(self):
+        """Загружает существующие объявления из файла"""
         if os.path.exists(self.all_ads_file):
             try:
                 with open(self.all_ads_file, 'r', encoding='utf-8') as f:
                     self.all_ads = json.load(f)
-                self.logger.info(f"Загружено {len(self.all_ads)} существующих объявлений из all_ads.json")
+                self.logger.info(f"Загружено {len(self.all_ads)} существующих объявлений")
             except json.JSONDecodeError:
-                self.logger.warning("Файл all_ads.json существует, но содержит некорректный JSON. Создаем новый файл.")
-                self.all_ads = []
+                self.logger.warning("Файл all_ads.json содержит некорректный JSON. Создаем новый.")
             except Exception as e:
                 self.logger.error(f"Ошибка при загрузке all_ads.json: {e}")
-                self.all_ads = []
 
-        # Загружаем URL из JSON
+    def load_menu_urls(self):
+        """Загружает URL из файла меню"""
         try:
             with open('sob_menu_links.json', 'r', encoding='utf-8') as f:
                 self.menu_data = json.load(f)
 
-                # Составляем список всех URL
+                # Составляем список URL
                 for category in self.menu_data:
                     for item in self.menu_data[category]:
                         self.start_urls.append(item['url'])
 
-                if not self.start_urls:
-                    self.logger.error("В JSON файле не найдено ссылок")
+                if self.start_urls:
+                    self.logger.info(f"Загружено {len(self.start_urls)} ссылок из меню")
                 else:
-                    self.logger.info(f"Загружено {len(self.start_urls)} ссылок из JSON")
+                    self.logger.error("В JSON файле меню не найдено ссылок")
 
         except Exception as e:
-            self.logger.error(f"Ошибка при загрузке JSON: {e}")
+            self.logger.error(f"Ошибка при загрузке файла меню: {e}")
 
     def parse(self, response: Response) -> Iterable[Request]:
         current_page = response.meta.get('page', 1)
@@ -389,8 +418,11 @@ class SobAdsSpider(scrapy.Spider):
                     else:
                         next_url = f"{base_url}?page={next_page}"
 
-                yield scrapy.Request(
+                yield Request(
                     next_url,
+                    method="GET",
+                    callback=self.parse,
+                    errback=self.handle_error,
                     meta={
                         'page': next_page,
                         'base_url': base_url,
@@ -398,8 +430,6 @@ class SobAdsSpider(scrapy.Spider):
                         'square_from': square_from,
                         'square_to': square_to
                     },
-                    callback=self.parse,
-                    errback=self.handle_error
                 )
 
     def create_area_filtered_request(self, base_url, square_from, square_to, ads_count):
@@ -429,18 +459,18 @@ class SobAdsSpider(scrapy.Spider):
         else:
             next_url = f"{base_url}?total_square_from={square_from}&total_square_to={square_to}"
 
-        return scrapy.Request(
+        return Request(
             next_url,
             method='GET',
-            meta={
+            callback=self.parse,
+            errback=self.handle_error,
+            meta = {
                 'page': page,
                 'base_url': base_url,
                 'ads_count': ads_count,
                 'square_from': square_from,
                 'square_to': square_to
             },
-            callback=self.parse,
-            errback=self.handle_error
         )
 
     # Парсим объявления
