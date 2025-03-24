@@ -308,17 +308,18 @@ class SobAdsSpider(scrapy.Spider):
     def __init__(self, *args, **kwargs):
         super(SobAdsSpider, self).__init__(*args, **kwargs)
         self.start_urls = []
-        self.all_ads_file = '../../../results/all_ads.json'
+        self.results_dir = '../../../results'
+        self.all_ads_file = f'{self.results_dir}/all_ads.json'
         self.all_ads = []
 
         # Создаем директорию для результатов
-        self._ensure_results_directory()
+        self.ensure_results_directory()
 
         # Загружаем существующие объявления
-        self._load_existing_ads()
+        self.load_existing_ads()
 
         # Загружаем URL из меню
-        self._load_menu_urls()
+        self.load_menu_urls()
 
     # Проверяем существование файла all_ads.json и загружаем его содержимое
     def ensure_results_directory(self):
