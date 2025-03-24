@@ -36,7 +36,15 @@ class SobDetailSpider(scrapy.Spider):
         self.ad_urls = self._load_ad_urls()
 
     def start_requests(self) -> Iterable[Request]:
-        return super().start_requests()
+        """Создает запросы для каждого URL из списка объявлений"""
+        if not self.ad_urls:
+            self.logger.info("Нет новых URL для обработки")
+            return []
+
+        self.logger.info(f"Запуск обработки {len(self.ad_urls)} URL-адресов")
+        for url in self.ad_urls:
+            yield Request(url=url, callback=self.parse_detail)
+
     def _ensure_results_directory(self):
         """Создает директорию для результатов, если её нет"""
         if not os.path.exists(self.results_dir):
@@ -78,7 +86,7 @@ class SobDetailSpider(scrapy.Spider):
 
         self.logger.info(f"Загружено {len(ad_urls)} новых ссылок на объявления")
         return ad_urls
-    def parse_detail(self, response: Response) -> Iterable[Request]:
+    def parse_detail(self, response: Response) -> Iterable[dict]:
         self.logger.info(f"Парсинг деталей объявления %s: {response.url}")
 
         # Извлекаем все требуемые данные
@@ -276,16 +284,32 @@ class SobDetailSpider(scrapy.Spider):
 
         return None  # Возвращаем None, если дата не найдена
 
+
 class SobAdsSpider(scrapy.Spider):
     name = "sob_ads"
 
     def __init__(self, *args, **kwargs):
         super(SobAdsSpider, self).__init__(*args, **kwargs)
         self.start_urls = []
+        self.all_ads_file = '../../../results/all_ads.json'
+        self.all_ads = []
 
         # Создаем директорию для сохранения результатов, если её нет
         if not os.path.exists('../../../results'):
             os.makedirs('../../../results')
+
+        # Проверяем существование файла all_ads.json и загружаем его содержимое
+        if os.path.exists(self.all_ads_file):
+            try:
+                with open(self.all_ads_file, 'r', encoding='utf-8') as f:
+                    self.all_ads = json.load(f)
+                self.logger.info(f"Загружено {len(self.all_ads)} существующих объявлений из all_ads.json")
+            except json.JSONDecodeError:
+                self.logger.warning("Файл all_ads.json существует, но содержит некорректный JSON. Создаем новый файл.")
+                self.all_ads = []
+            except Exception as e:
+                self.logger.error(f"Ошибка при загрузке all_ads.json: {e}")
+                self.all_ads = []
 
         # Загружаем URL из JSON
         try:
@@ -305,7 +329,7 @@ class SobAdsSpider(scrapy.Spider):
         except Exception as e:
             self.logger.error(f"Ошибка при загрузке JSON: {e}")
 
-    def parse(self, response):
+    def parse(self, response: Response) -> Iterable[Request]:
         current_page = response.meta.get('page', 1)
         base_url = response.meta.get('base_url', response.url)
         ads_count = response.meta.get('ads_count', 0)
@@ -320,7 +344,7 @@ class SobAdsSpider(scrapy.Spider):
         # Если это первая страница, проверяем необходимость разделения поиска по площади
         if current_page == 1 and last_page_link and int(last_page_link) >= 30:
             # Формируем новый запрос с параметрами площади
-            return self._create_area_filtered_request(base_url, square_from, square_to, ads_count)
+            return self.create_area_filtered_request(base_url, square_from, square_to, ads_count)
 
         # Если результатов немного и у нас установлены параметры площади, переходим к следующему диапазону
         elif current_page == 1 and square_from is not None and square_to is not None and last_page_link and int(
@@ -332,9 +356,53 @@ class SobAdsSpider(scrapy.Spider):
             self.logger.info(f"Переходим к следующему диапазону площади: {new_square_from}-{new_square_to}")
             yield self._create_request(base_url, 1, ads_count, new_square_from, new_square_to)
 
-    def _create_area_filtered_request(self, base_url, square_from, square_to, ads_count):
-        """Создает запрос с фильтрацией по площади"""
+        # Парсим объявления на текущей странице
+        result = self.parse_ads(response, current_page, base_url, square_from, square_to, ads_count)
 
+        if result:
+            ads, new_ads_count = result
+
+            # Добавляем найденные объявления в общий список
+            if ads:
+                self.all_ads.extend(ads)
+
+                # Сохраняем обновленный список в JSON-файл
+                self.save_all_ads_to_json()
+
+                ads_count = new_ads_count
+                self.logger.info(f"Всего объявлений: {ads_count}, всего в all_ads.json: {len(self.all_ads)}")
+
+            # Проверяем наличие следующей страницы
+            if last_page_link and current_page < int(last_page_link):
+                next_page = current_page + 1
+                self.logger.info(f"Переход на страницу {next_page}")
+
+                # Формируем URL для следующей страницы
+                if square_from is not None and square_to is not None:
+                    if '?' in base_url:
+                        next_url = f"{base_url}&total_square_from={square_from}&total_square_to={square_to}&page={next_page}"
+                    else:
+                        next_url = f"{base_url}?total_square_from={square_from}&total_square_to={square_to}&page={next_page}"
+                else:
+                    if '?' in base_url:
+                        next_url = f"{base_url}&page={next_page}"
+                    else:
+                        next_url = f"{base_url}?page={next_page}"
+
+                yield scrapy.Request(
+                    next_url,
+                    meta={
+                        'page': next_page,
+                        'base_url': base_url,
+                        'ads_count': ads_count,
+                        'square_from': square_from,
+                        'square_to': square_to
+                    },
+                    callback=self.parse,
+                    errback=self.handle_error
+                )
+
+    def create_area_filtered_request(self, base_url, square_from, square_to, ads_count):
         # Если параметры площади еще не установлены
         if square_from is None and square_to is None:
             square_from = 1
@@ -354,7 +422,6 @@ class SobAdsSpider(scrapy.Spider):
         return self._create_request(base_url, 1, ads_count, square_from, square_to)
 
     def _create_request(self, base_url, page, ads_count, square_from, square_to):
-        """Вспомогательный метод для создания запроса с параметрами"""
 
         # Формируем URL с параметрами площади
         if '?' in base_url:
@@ -394,17 +461,15 @@ class SobAdsSpider(scrapy.Spider):
         self.logger.info(f"Найдено {len(grid_items)} элементов grid-search-content")
 
         # Извлекаем информацию из объявлений
-        ads = self._extract_ads_info(response, grid_items)
+        ads = self.extract_ads_info(response, grid_items)
 
-        # Сохраняем объявления, если они есть
+        # Обновляем счетчик объявлений
         if ads:
-            self._save_ads_to_file(ads)
             ads_count += len(ads)
 
         return ads, ads_count
 
-    def _extract_ads_info(self, response, grid_items):
-        """Извлекает информацию из объявлений"""
+    def extract_ads_info(self, response, grid_items):
         ads = []
 
         for item in grid_items:
@@ -422,7 +487,28 @@ class SobAdsSpider(scrapy.Spider):
                 ads.append(ad_info)
                 self.logger.info(f"Найдено объявление: {ad_info['title']} - {href}")
 
-            return ads
+        return ads
+
+    def save_all_ads_to_json(self):
+        try:
+            # Проверяем на дубликаты по URL
+            unique_ads = []
+            seen_urls = set()
+
+            for ad in self.all_ads:
+                if ad['url'] not in seen_urls:
+                    seen_urls.add(ad['url'])
+                    unique_ads.append(ad)
+
+            self.all_ads = unique_ads
+
+            with open(self.all_ads_file, 'w', encoding='utf-8') as f:
+                json.dump(self.all_ads, f, ensure_ascii=False, indent=4)
+
+            self.logger.info(f"Сохранено {len(self.all_ads)} объявлений в all_ads.json")
+        except Exception as e:
+            self.logger.error(f"Ошибка при сохранении в all_ads.json: {e}")
+
     def handle_error(self, failure) -> None:
         if failure.check(HttpError):
             self.logger.error(
@@ -432,70 +518,78 @@ class SobAdsSpider(scrapy.Spider):
             )
         elif failure.check(DNSLookupError):
             self.logger.error("DNSLookupError on %s", failure.request.url)
-        elif failure.check((TimeoutError, TCPTimedOutError)):
+        elif failure.check(TimeoutError, TCPTimedOutError):
             self.logger.error("TimeoutError on %s", failure.request.url)
 
 class SobMenuSpider(scrapy.Spider):
     name = "sob_menu"
     start_urls = ["https://sob.ru/"]
 
+    def parse_menu_item(self, item, response):
+        menu_text = item.xpath('./a/text()').get()
+        if not menu_text or menu_text.strip() not in ['Продажа', 'Аренда']:
+            return None
+
+        menu_text = menu_text.strip()
+        self.logger.info(f"Найден пункт меню: {menu_text}")
+
+        links_data = []
+        links = item.xpath('./a[@href]')
+        self.logger.info(f"В разделе {menu_text} найдено {len(links)} ссылок")
+
+        for link in links:
+            url = link.xpath('./@href').get()
+            title = item.xpath('./a/text()').get()
+
+            if not title:
+                continue
+
+            title = title.strip()
+
+            # Определяем регион из контекста
+            parent_ul = link.xpath('./parent::li/parent::ul')
+            region_text = parent_ul.xpath('./li[1]/text()').get()
+            region = region_text.strip() if region_text else "Неизвестно"
+
+            links_data.append({
+                'title': title,
+                'url': response.urljoin(url),
+                'region': region
+            })
+            self.logger.info(f"Добавлена ссылка: {title} - {url}")
+
+        return menu_text, links_data
+
     def parse(self, response):
-        # Сначала проверим, загрузилась ли страница вообще
         self.logger.info(f"Заголовок страницы: {response.xpath('//title/text()').get()}")
 
-        # Ищем меню по классу более универсально
         header_menu = response.xpath('//ul[contains(@class, "header-menu-list")]')
         self.logger.info(f"Найдено header-menu-list: {len(header_menu)}")
 
-        # Если меню найдено, парсим его
-        if header_menu:
-            # Находим все пункты меню
-            menu_items = header_menu.xpath('./li')
-            self.logger.info(f"Найдено {len(menu_items)} пунктов меню")
+        if not header_menu:
+            return {}
 
-            results = {}
+        menu_items = header_menu.xpath('./li')
+        self.logger.info(f"Найдено {len(menu_items)} пунктов меню")
 
-            for item in menu_items:
-                menu_text = item.xpath('./a/text()').get()
-                if menu_text:
-                    menu_text = menu_text.strip()
-                    self.logger.info(f"Найден пункт меню: {menu_text}")
+        results = {}
 
-                    if menu_text in ['Продажа', 'Аренда']:
-                        results[menu_text] = []
+        for item in menu_items:
+            parsed_data = self.parse_menu_item(item, response)
+            if parsed_data:
+                menu_text, links_data = parsed_data
+                results[menu_text] = links_data
 
-                        # Ищем все ссылки в подменю
-                        links = item.xpath('./a[@href]')
-                        self.logger.info(f"В разделе {menu_text} найдено {len(links)} ссылок")
+                # Сохраняем результаты
+                with open('../../sob_menu_links.json', 'w', encoding='utf-8') as f:
+                    json.dump(results, f, ensure_ascii=False, indent=4)
 
-                        for link in links:
-                            url = link.xpath('./@href').get()
-                            title = item.xpath('./a/text()').get()
-
-                            if title:
-                                title = title.strip()
-
-                                # Определяем регион из контекста
-                                parent_ul = link.xpath('./parent::li/parent::ul')
-                                region_text = parent_ul.xpath('./li[1]/text()').get()
-                                region = region_text.strip() if region_text else "Неизвестно"
-
-                                link_data = {
-                                    'title': title,
-                                    'url': response.urljoin(url),
-                                    'region': region
-                                }
-
-                                results[menu_text].append(link_data)
-                                self.logger.info(f"Добавлена ссылка: {title} - {url}")
-
-            # Сохраняем результаты
-            with open('../../sob_menu_links.json', 'w', encoding='utf-8') as f:
-                json.dump(results, f, ensure_ascii=False, indent=4)
-
-            return results
+                return results
         else:
             self.logger.error("Меню не найдено!")
+
+        return results
+
 
 # Запускаем паук напрямую
 if __name__ == "__main__":
