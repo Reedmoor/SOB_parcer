@@ -13,7 +13,9 @@
 - Локально
     1. Клонировать репозиторий `git clone https://github.com/Reedmoor/SOB_parcer`
     2. Установить зависимости `pip install scrapy`
-    3. `py parser.py`
+    3. Зайти в директорию `../SOB_parcer/SOB`
+    4. `scrapy crawl sob_ads`
+    5. `scrapy crawl details`
 
 ## Конфигурация
 
