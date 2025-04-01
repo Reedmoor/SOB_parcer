@@ -27,15 +27,6 @@ CATEGORY = "frezery"
 
 ## Модели/Структуры данных
 
-### Объявление
-
-```json
-{
-        "title": "Продается комната в 3-комнатной квартире",
-        "url": "https://sob.ru/prodazha-komnat-moskva-3-komn-metro-kolomenskaya/card-754452504"
-    }
-```
-
 ### Детали объявления
 
 ```json
